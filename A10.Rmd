@@ -1,0 +1,374 @@
+---
+title: "Week 10 Assignment - Sentiment Analysis"
+author: "Tora Mullings"
+date: "4/5/2022"
+output: html_document
+---
+
+## Introduction
+Sentiment analysis is the practice of extracting or classifying subjective portions of text. Here will first examine a code example of sentiment analysis on Jane Austen books, followed by an example on a different corpus.
+
+## Base Analysis
+#### Unnest tokens
+The corpus, or body of text, that we will perform sentiment analysis on is Jane Austen's books, from the `janeaustenr` library. 
+```{r}
+library(tidytext)
+library(janeaustenr)
+library(dplyr)
+library(stringr)
+
+
+tidy_books <- austen_books() %>%
+  group_by(book) %>%
+  mutate(
+    linenumber = row_number(),
+    chapter = cumsum(str_detect(text, 
+                                regex("^chapter [\\divxlc]", 
+                                      ignore_case = TRUE)))) %>%
+  ungroup() %>%
+  unnest_tokens(word, text)
+```
+
+In this portion of the code, we create a data frame, `tidybooks`, that contains each book's text. The function `unnest_tokens` is from the `tidytext` package, and it is used to break the text into single words.
+
+A regex is used to find each chapter in each book, which allows us to see the chapter that each word belongs to. The line number that each word appears on is included as well.
+
+#### Sentiments from bing
+With the single words now in the `words` column, we can start to do sentiment analysis. This is important because several `sentiments` datasets have a column named `words` as well, which will allow us to do different join operations. From the `tidytext` package, there are many sentiment lexicons you can use to help extract the information. 
+
+Here, the `bing` lexicon is used to classify each word as positive or negative. We perform an inner join to get the sentiment words that appear in the `bing` dataset as well as the `tidybooks` data frame. A sentiment value (postive or negative) is assigned each block of 80 lines rather than each word because this way has enough words to give a good estimate of sentiment.
+
+Then the number of positive and negative words are split between 2 columns, and another column is added to show the difference between them. At this point, we can see the total sentiment that the `bing` lexicon assigned to each block of 80 lines.
+```{r}
+library(tidyr)
+
+jane_austen_sentiment <- tidy_books %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(book, index = linenumber %/% 80, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+```
+
+You can see a visualization of each book's total sentiment using `ggplot2`.
+```{r}
+library(ggplot2)
+
+ggplot(jane_austen_sentiment, aes(index, sentiment, fill = book)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~book, ncol = 2, scales = "free_x")
+```
+
+#### Comparing the three sentiment dictionaries
+We will focus on the book Pride & Prejudice as we compare the sentiment dictionaries: bing, AFINN, and NRC.
+```{r}
+pride_prejudice <- tidy_books %>% 
+  filter(book == "Pride & Prejudice")
+
+pride_prejudice
+```
+
+
+NRC and bing both classify sentiment as either positive or negative, but AFINN assigns a value between -5 and 5. This portion of the code calls on all three dictionaries to assign sentiment values to the 80-line blocks in Pride & Prejudice. The sentiments are compiled into one data frame. 
+```{r}
+afinn <- pride_prejudice %>% 
+  inner_join(get_sentiments("afinn")) %>% 
+  group_by(index = linenumber %/% 80) %>% 
+  summarise(sentiment = sum(value)) %>% 
+  mutate(method = "AFINN")
+
+bing_and_nrc <- bind_rows(
+  pride_prejudice %>% 
+    inner_join(get_sentiments("bing")) %>%
+    mutate(method = "Bing et al."),
+  pride_prejudice %>% 
+    inner_join(get_sentiments("nrc") %>% 
+                 filter(sentiment %in% c("positive", 
+                                         "negative"))
+    ) %>%
+    mutate(method = "NRC")) %>%
+  count(method, index = linenumber %/% 80, sentiment) %>%
+  pivot_wider(names_from = sentiment,
+              values_from = n,
+              values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+```
+
+Again `ggplot2` is used to visualize the sentiment, this time across three dictionaries.
+```{r}
+bind_rows(afinn, 
+          bing_and_nrc) %>%
+  ggplot(aes(index, sentiment, fill = method)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~method, ncol = 1, scales = "free_y")
+```
+
+
+#### Most common positive and negative words
+Returning to `tidy_books`, count the number of times a word from the `bing` dictionary appears, and show its sentiment value.
+```{r}
+bing_word_counts <- tidy_books %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup()
+
+bing_word_counts
+```
+Visualize the the top ten most frequently appearing sentiment words, faceted by sentiment value.
+```{r}
+bing_word_counts %>%
+  group_by(sentiment) %>%
+  slice_max(n, n = 10) %>% 
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(x = "Contribution to sentiment",
+       y = NULL)
+```
+
+
+This portion of code can be used to define your own stop-words. Here, the word "miss" is added.
+```{r}
+custom_stop_words <- bind_rows(tibble(word = c("miss"),  
+                                      lexicon = c("custom")), 
+                               stop_words)
+
+custom_stop_words
+```
+
+
+#### Wordclouds
+A wordcloud can help to visualize the most frequently appearing words. First the stop-words are filtered out, then a count of the remaining words are used to form the wordcloud. 
+```{r}
+library(wordcloud)
+
+tidy_books %>%
+  anti_join(stop_words) %>%
+  count(word) %>%
+  with(wordcloud(word, n, max.words = 100))
+```
+
+
+This visualization is a type of word cloud that points out the most important postive and negative words according the `bing` dictionary.
+```{r}
+library(reshape2)
+
+tidy_books %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>%
+  comparison.cloud(colors = c("gray20", "gray80"),
+                   max.words = 100)
+```
+
+
+
+#### Looking at units beyond just words
+So far, the tokens derived from the text have been single words. This code shows how to derive sentences. It may be more accurate when extracting the sentiment.
+```{r}
+p_and_p_sentences <- tibble(text = prideprejudice) %>% 
+  unnest_tokens(sentence, text, token = "sentences")
+p_and_p_sentences$sentence[2]
+```
+
+This code splits the text by chapter. It uses a regex to determine where a chapter beings.
+```{r}
+austen_chapters <- austen_books() %>%
+  group_by(book) %>%
+  unnest_tokens(chapter, text, token = "regex", 
+                pattern = "Chapter|CHAPTER [\\dIVXLC]") %>%
+  ungroup()
+```
+
+
+Here the number of chapters in each book can be determined.
+```{r}
+austen_chapters %>% 
+  group_by(book) %>% 
+  summarise(chapters = n())
+```
+
+
+Now we explore which chapter has the most negative words in each chapter. The `bing` dictionary is used to assign sentiment to the words
+```{r}
+bingnegative <- get_sentiments("bing") %>% 
+  filter(sentiment == "negative")
+
+wordcounts <- tidy_books %>%
+  group_by(book, chapter) %>%
+  summarize(words = n())
+```
+
+Joins are used to determine which words among all the books (`tidy_books`) are in common with the negative words in `bing`. A join on the `wordcounts` is used to get the number of each negative word. The `ratio` column holds the ratio of negative words in each chapter to total words in each chapter.
+```{r}
+tidy_books %>%
+  semi_join(bingnegative) %>%
+  group_by(book, chapter) %>%
+  summarize(negativewords = n()) %>%
+  left_join(wordcounts, by = c("book", "chapter")) %>%
+  mutate(ratio = negativewords/words) %>%
+  filter(chapter != 0) %>%
+  slice_max(ratio, n = 1) %>% 
+  ungroup()
+```
+
+### Citation
+Silge, J., &amp; Robinson, D. (2017). 2. In Text mining with R: A tidy approach. essay, O'Reilly. 
+
+
+
+## Extend Analysis
+Performing sentiment analysis on a different corpus, A Tale of Two Cities by Charles Dickens. 
+Download by ID from https://www.gutenberg.org/ebooks/98. 
+```{r}
+library(gutenbergr)
+
+tale <- gutenberg_download(98)
+```
+
+
+
+```{r}
+tidy_tale <- tale %>%
+  mutate(
+    linenumber = row_number(),
+    chapter = cumsum(str_detect(text, 
+                                regex("^chapter [\\divxlc]", 
+                                      ignore_case = TRUE)))) %>%
+  ungroup() %>%
+  unnest_tokens(word, text)
+```
+
+Filter out rows that have 0 as the chapter, since these are lines from the book's index. Drop the `gutenberg_id` column because it's not needed.
+```{r}
+tidy_tale <- tidy_tale %>% 
+  filter(chapter>0) %>% 
+  select(linenumber:word)
+```
+
+Compare sentiment derived based on 4 dictionaries: AFINN, NRC, Bing et al., and Loughran. The first 3 are general dictionaries, but Loughran is a dictionary of financial sentiment terms. Let's see how it will do in comparison to the others.
+```{r}
+afinn <- tidy_tale %>% 
+  inner_join(get_sentiments("afinn")) %>% 
+  group_by(index = linenumber %/% 80) %>% 
+  summarise(sentiment = sum(value)) %>% 
+  mutate(method = "AFINN")
+
+loughran <- tidy_tale %>%
+  inner_join(get_sentiments("loughran")) %>%
+  filter(sentiment %in% c("positive",
+                          "negative"))%>% 
+  mutate(method = "Loughran") %>% 
+  count(method, index = linenumber %/% 80, sentiment) %>%
+  
+  pivot_wider(names_from = sentiment,
+              values_from = n,
+              values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+
+
+bing_and_nrc <- bind_rows(
+  tidy_tale %>% 
+    inner_join(get_sentiments("bing")) %>%
+    mutate(method = "Bing et al."),
+  
+  tidy_tale %>% 
+    inner_join(get_sentiments("nrc") %>% 
+                 filter(sentiment %in% c("positive", 
+                                         "negative"))
+    ) %>%
+    mutate(method = "NRC")) %>%
+  count(method, index = linenumber %/% 80, sentiment) %>%
+  pivot_wider(names_from = sentiment,
+              values_from = n,
+              values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+```
+
+
+
+```{r}
+bind_rows(afinn, 
+          bing_and_nrc, loughran) %>%
+  ggplot(aes(index, sentiment, fill = method)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~method, ncol = 1, scales = "free_y")
+```
+
+
+The visualization shows that Bing et al., and especially Loughran, classified many words as negative. Let's view which are the most occurring words and their sentiment values according to Bing et al. and Loughran.
+
+```{r}
+bing_word_counts <- tidy_tale %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup()
+
+bing_word_counts
+```
+
+
+
+```{r}
+loughran_word_counts <- tidy_tale %>%
+  inner_join(get_sentiments("loughran")) %>%
+    filter(sentiment %in% c("positive",
+                          "negative"))%>% 
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup()
+
+loughran_word_counts
+```
+
+The word "miss" appears the most times, and both classify it as a negative word. Perhaps this book is a similar case as the Jane Austen books, where "miss" refers to the title of a young married woman rather than the negative longing for something. 
+
+Notice that there are many differences in the words in these lists. This may be because Loughran has several classifying names for words, whereas Bing has only 2 categories (postive or negative). Also recall that Loughran is for financial sentiment. Although we had filtered out the "positive" and "negative" words from Loughran, they may not all match up with those in Bing et al.
+
+We can also see that out of the top 10 most common words in A Tale of Two cities, Bing et al. classified 4 of them as negative. Loughran classified 6 of them as negative.
+
+
+```{r}
+tidy_tale %>%
+  inner_join(get_sentiments("loughran")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  filter(sentiment %in% c("positive",
+                          "negative"))%>% 
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>%
+  comparison.cloud(colors = c("gray20", "gray80"),
+                   max.words = 100)
+```
+
+```{r}
+loughran_word_counts %>%
+  group_by(sentiment) %>%
+  slice_max(n, n = 10) %>% 
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(x = "Contribution to sentiment",
+       y = NULL)
+```
+
+
+
+## Conclusion
+It's important to know the type of dictionary you will use to do sentiment analysis. Some of them may not fit your project. For example, I did sentiment analysis on a historical novel but decided to use the Loughran dictionary of financial sentiment. As seen in the comparison visualization of dictionaries, the results were extreme. Many words were classified as negative by this dictionary, even more so than Bing et al. Given the context of the book, this may be correct, but I would still rather use any of the other dictionaries besides Loughran for sentimental analysis on a novel. Loughran is better suited for financial texts.
+
+Also, recall that we had to filter out only the words classified as positive or negative so that we could do a comparison with Bing et al. There are many other categories that Loughran could classify words into. This demonstrates that it's important to account for the difference in categories between dictionaries when making comparisons. Another takeaway is that words that different meanings need to be considered, as in the case of the word "miss". One approach is to place the words that you believe do not have sentimental value in the context of the corpus into a custom list of stop-words. 
+
+
+
+
+
+
+
+
+
+
+
+
+
